@@ -1,0 +1,89 @@
+name: Building docker image
+
+on:
+  push:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: 354089337523.dkr.ecr.ap-south-1.amazonaws.com
+  ECR_REPOSITORY: githubaction
+  ECS_CLUSTER: learning-docker-ecs        
+  ECS_SERVICE: github-learning-service-wn9g10ne         
+  ECS_TASK_DEFINITION: task-definition.json   
+  CONTAINER_NAME: docker-larning         
+
+jobs:
+  creating_image:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.outputs.AUTO_TAG }}
+      image_uri: ${{ steps.push.outputs.image_uri }}
+    steps:
+      - name: getting the code
+        uses: actions/checkout@v4
+
+      - name: Generate Docker tag
+        id: vars
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          TIMESTAMP=$(date +'%Y%m%d%H%M%S')
+          echo "AUTO_TAG=${SHORT_SHA}-${TIMESTAMP}" >> $GITHUB_OUTPUT
+
+      - name: build the image
+        run: docker build -t githubaction:${{ steps.vars.outputs.AUTO_TAG }} .
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::354089337523:role/github-action-for-ecr
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: tag and push image to ECR
+        id: push
+        run: |
+          IMAGE_URI=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.AUTO_TAG }}
+          docker tag githubaction:${{ steps.vars.outputs.AUTO_TAG }} $IMAGE_URI
+          docker push $IMAGE_URI
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+  ECS-Push:
+    needs: creating_image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::354089337523:role/github-action-for-ecr
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Render task definition (replace image)
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.creating_image.outputs.image_uri }}
+
+      - name: Deploy to ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: false
